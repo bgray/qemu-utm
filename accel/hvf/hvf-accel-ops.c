@@ -322,7 +322,7 @@ static int hvf_accel_init(MachineState *ms)
     hv_return_t ret;
     HVFState *s;
 
-    ret = hvf_arch_vm_create();
+    ret = hvf_arch_vm_create(ms, 0);
     assert_hvf_ok(ret);
 
     s = g_new0(HVFState, 1);

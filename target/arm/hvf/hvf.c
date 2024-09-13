@@ -963,6 +963,22 @@ void hvf_arch_vcpu_destroy(CPUState *cpu)
 {
 }
 
+hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range)
+{
+    hv_return_t ret;
+    hv_vm_config_t config = hv_vm_config_create();
+#if defined(CONFIG_HVF_PRIVATE)
+    if (hvf_tso_mode) {
+        _hv_vm_config_set_isa(config, HV_VM_CONFIG_ISA_PRIVATE);
+    }
+    ret = hv_vm_create(config);
+#else
+    ret = hv_vm_create(config);
+#endif
+    os_release(config);
+    return ret;
+}
+
 int hvf_arch_init_vcpu(CPUState *cpu)
 {
     ARMCPU *arm_cpu = ARM_CPU(cpu);
@@ -2086,22 +2102,6 @@ static void hvf_vm_state_change(void *opaque, bool running, RunState state)
         /* Remember vtimer value on every pause */
         s->vtimer_val = hvf_vtimer_val_raw();
     }
-}
-
-hv_return_t hvf_arch_vm_create(void)
-{
-#if defined(CONFIG_HVF_PRIVATE)
-    hv_return_t ret;
-    hv_vm_config_t config = hv_vm_config_create();
-    if (hvf_tso_mode) {
-        _hv_vm_config_set_isa(config, HV_VM_CONFIG_ISA_PRIVATE);
-    }
-    ret = hv_vm_create(config);
-    os_release(config);
-    return ret;
-#else
-    return hv_vm_create(HV_VM_DEFAULT);
-#endif
 }
 
 int hvf_arch_init(void)

@@ -218,14 +218,14 @@ void hvf_kick_vcpu_thread(CPUState *cpu)
     hv_vcpu_interrupt(&cpu->accel->fd, 1);
 }
 
-hv_return_t hvf_arch_vm_create(void)
-{
-    return hv_vm_create(HV_VM_DEFAULT);
-}
-
 int hvf_arch_init(void)
 {
     return 0;
+}
+
+hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range)
+{
+    return hv_vm_create(HV_VM_DEFAULT);
 }
 
 int hvf_arch_init_vcpu(CPUState *cpu)
