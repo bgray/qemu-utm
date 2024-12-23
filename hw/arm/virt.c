@@ -3047,6 +3047,11 @@ static int virt_hvf_get_physical_address_range(MachineState *ms)
     int default_ipa_size = hvf_arm_get_default_ipa_bit_size();
     int max_ipa_size = hvf_arm_get_max_ipa_bit_size();
 
+    /* Unknown max ipa size, we'll let the caller figure it out */
+    if (max_ipa_size == 0) {
+        return 0;
+    }
+
     /* We freeze the memory map to compute the highest gpa */
     virt_set_memmap(vms, max_ipa_size);
 
