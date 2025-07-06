@@ -857,12 +857,11 @@ static const VMStateDescription vmstate_hda_audio = {
     }
 };
 
-static Property hda_audio_properties[] = {
+static const Property hda_audio_properties[] = {
     DEFINE_AUDIO_PROPERTIES(HDAAudioState, card),
     DEFINE_PROP_UINT32("debug", HDAAudioState, debug,   0),
     DEFINE_PROP_BOOL("mixer", HDAAudioState, mixer,  true),
     DEFINE_PROP_BOOL("use-timer", HDAAudioState, use_timer,  true),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void hda_audio_init_output(HDACodecDevice *hda, Error **errp)
@@ -910,7 +909,7 @@ static void hda_audio_base_class_init(ObjectClass *klass, void *data)
     k->command = hda_audio_command;
     k->stream = hda_audio_stream;
     set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
-    dc->reset = hda_audio_reset;
+    device_class_set_legacy_reset(dc, hda_audio_reset);
     dc->vmsd = &vmstate_hda_audio;
     device_class_set_props(dc, hda_audio_properties);
 }

@@ -18,8 +18,8 @@
 #include "qemu/osdep.h"
 #include <spice.h>
 
-#include "sysemu/sysemu.h"
-#include "sysemu/runstate.h"
+#include "system/system.h"
+#include "system/runstate.h"
 #include "ui/qemu-spice.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
@@ -845,9 +845,9 @@ static void qemu_spice_init(void)
             exit(1);
         }
 #if defined(CONFIG_GBM)
-        egl_init(qemu_opt_get(opts, "rendernode"), DISPLAYGL_MODE_ON, &error_fatal);
+        egl_init(qemu_opt_get(opts, "rendernode"), DISPLAY_GL_MODE_ON, &error_fatal);
 #elif defined(CONFIG_ANGLE)
-        if (qemu_egl_init_dpy_angle(DISPLAYGL_MODE_ES)) {
+        if (qemu_egl_init_dpy_angle(DISPLAY_GL_MODE_ES)) {
             error_report("SPICE GL failed to initialize ANGLE display");
             exit(1);
         }

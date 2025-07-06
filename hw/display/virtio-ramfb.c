@@ -1,5 +1,5 @@
 #include "qemu/osdep.h"
-#include "sysemu/sysemu.h"
+#include "system/system.h"
 #include "hw/pci/pci.h"
 #include "ui/console.h"
 #include "hw/qdev-properties.h"
@@ -114,17 +114,19 @@ static void virtio_ramfb_realize(VirtIOPCIProxy *vpci_dev, Error **errp)
     }
 }
 
-static void virtio_ramfb_reset(DeviceState *dev)
+static void virtio_ramfb_reset_hold(Object *obj, ResetType type)
 {
+    VirtIORAMFBBase *dev = VIRTIO_RAMFB_BASE(obj);
     VirtIORAMFBBaseClass *klass = VIRTIO_RAMFB_BASE_GET_CLASS(dev);
 
     /* reset virtio-gpu */
-    klass->parent_reset(dev);
+    if (klass->parent_phases.hold) {
+        klass->parent_phases.hold(obj, type);
+    }
 }
 
-static Property virtio_ramfb_base_properties[] = {
+static const Property virtio_ramfb_base_properties[] = {
     DEFINE_VIRTIO_GPU_PCI_PROPERTIES(VirtIOPCIProxy),
-    DEFINE_PROP_END_OF_LIST(),
 };
 
 static void virtio_ramfb_base_class_init(ObjectClass *klass, void *data)
@@ -133,13 +135,14 @@ static void virtio_ramfb_base_class_init(ObjectClass *klass, void *data)
     VirtioPCIClass *k = VIRTIO_PCI_CLASS(klass);
     VirtIORAMFBBaseClass *v = VIRTIO_RAMFB_BASE_CLASS(klass);
     PCIDeviceClass *pcidev_k = PCI_DEVICE_CLASS(klass);
+    ResettableClass *rc = RESETTABLE_CLASS(klass);
 
     set_bit(DEVICE_CATEGORY_DISPLAY, dc->categories);
     device_class_set_props(dc, virtio_ramfb_base_properties);
     dc->vmsd = &vmstate_virtio_ramfb;
     dc->hotpluggable = false;
-    device_class_set_parent_reset(dc, virtio_ramfb_reset,
-                                  &v->parent_reset);
+    resettable_class_set_parent_phases(rc, NULL, virtio_ramfb_reset_hold, NULL,
+                                       &v->parent_phases);
 
     k->realize = virtio_ramfb_realize;
     pcidev_k->class_id = PCI_CLASS_DISPLAY_OTHER;
