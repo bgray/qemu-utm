@@ -11,4 +11,4 @@
  * consider these to be UNSPEC with names.
  */
 
-DEF(aa64_sshl_vec, 1, 2, 0, IMPLVEC)
+DEF(aa64_sshl_vec, 1, 2, 0, TCG_OPF_VECTOR)

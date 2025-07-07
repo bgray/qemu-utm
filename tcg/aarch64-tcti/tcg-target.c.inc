@@ -28,6 +28,14 @@
 
 #define TCTI_GADGET_IMMEDIATE_ARRAY_LEN 64
 
+// Specify the shape of the stack our runtime will use.
+#define TCG_TARGET_CALL_STACK_OFFSET    0
+#define TCG_TARGET_STACK_ALIGN          16
+#define TCG_TARGET_CALL_ARG_I32         TCG_CALL_ARG_NORMAL
+#define TCG_TARGET_CALL_ARG_I64         TCG_CALL_ARG_NORMAL
+#define TCG_TARGET_CALL_ARG_I128        TCG_CALL_ARG_NORMAL
+#define TCG_TARGET_CALL_RET_I128        TCG_CALL_RET_NORMAL
+
 #include "tcg/tcg-ldst.h"
 
 // Grab our gadget headers.
@@ -55,7 +63,8 @@
  *  TCG Constraints Definitions *
  ********************************/
 
-static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode op)
+static TCGConstraintSetIndex
+tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
 {
     switch (op) {
 
@@ -157,15 +166,11 @@ static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode op)
     case INDEX_op_brcond_i64:
         return C_O0_I2(r, r);
 
-    case INDEX_op_qemu_ld_a32_i32:
-    case INDEX_op_qemu_ld_a64_i32:
-    case INDEX_op_qemu_ld_a32_i64:
-    case INDEX_op_qemu_ld_a64_i64:
+    case INDEX_op_qemu_ld_i32:
+    case INDEX_op_qemu_ld_i64:
         return C_O1_I2(r, r, r);
-    case INDEX_op_qemu_st_a32_i32:
-    case INDEX_op_qemu_st_a64_i32:
-    case INDEX_op_qemu_st_a32_i64:
-    case INDEX_op_qemu_st_a64_i64:
+    case INDEX_op_qemu_st_i32:
+    case INDEX_op_qemu_st_i64:
         return C_O0_I3(r, r, r);
 
     //
@@ -214,7 +219,7 @@ static TCGConstraintSetIndex tcg_target_op_def(TCGOpcode op)
         return C_O1_I3(w, w, w, w);
 
     default:
-        g_assert_not_reached();
+        return C_NotImplemented;
     }
 }
 
@@ -834,8 +839,9 @@ static void tcg_out_goto_tb(TCGContext *s, int which)
 /**
  * Generate every other operation.
  */
-//static void tcg_out_op(TCGContext *s, TCGOpcode opc, const TCGArg *args, const int *const_args)
-void tcg_out_op(TCGContext *s, TCGOpcode opc, const TCGArg *args, const int *const_args)
+static void tcg_out_op(TCGContext *s, TCGOpcode opc, TCGType type,
+                       const TCGArg args[TCG_MAX_OP_ARGS],
+                       const int const_args[TCG_MAX_OP_ARGS])
 {
     switch (opc) {
 
@@ -1244,11 +1250,10 @@ void tcg_out_op(TCGContext *s, TCGOpcode opc, const TCGArg *args, const int *con
         break;
     }
 
-    case INDEX_op_qemu_ld_a32_i32:
-    case INDEX_op_qemu_ld_a64_i32:
+    case INDEX_op_qemu_ld_i32:
     {
         MemOp opc = get_memop(args[2]);
-        unsigned a_bits = get_alignment_bits(opc);
+        unsigned a_bits = memop_alignment_bits(opc);
         unsigned s_bits = opc & MO_SIZE;
 
         void *gadget;
@@ -1269,11 +1274,10 @@ void tcg_out_op(TCGContext *s, TCGOpcode opc, const TCGArg *args, const int *con
         break;
     }
 
-    case INDEX_op_qemu_ld_a32_i64:
-    case INDEX_op_qemu_ld_a64_i64:
+    case INDEX_op_qemu_ld_i64:
     {
         MemOp opc = get_memop(args[2]);
-        unsigned a_bits = get_alignment_bits(opc);
+        unsigned a_bits = memop_alignment_bits(opc);
         unsigned s_bits = opc & MO_SIZE;
 
         void *gadget;
@@ -1310,11 +1314,10 @@ void tcg_out_op(TCGContext *s, TCGOpcode opc, const TCGArg *args, const int *con
         break;
     }
 
-    case INDEX_op_qemu_st_a32_i32:
-    case INDEX_op_qemu_st_a64_i32:
+    case INDEX_op_qemu_st_i32:
     {
         MemOp opc = get_memop(args[2]);
-        unsigned a_bits = get_alignment_bits(opc);
+        unsigned a_bits = memop_alignment_bits(opc);
         unsigned s_bits = opc & MO_SIZE;
 
         void *gadget;
@@ -1336,11 +1339,10 @@ void tcg_out_op(TCGContext *s, TCGOpcode opc, const TCGArg *args, const int *con
         break;
     }
 
-    case INDEX_op_qemu_st_a32_i64:
-    case INDEX_op_qemu_st_a64_i64:
+    case INDEX_op_qemu_st_i64:
     {
         MemOp opc = get_memop(args[2]);
-        unsigned a_bits = get_alignment_bits(opc);
+        unsigned a_bits = memop_alignment_bits(opc);
         unsigned s_bits = opc & MO_SIZE;
 
         void *gadget;
@@ -1440,6 +1442,11 @@ static bool tcg_target_const_match(int64_t val, int ct,
                                    TCGType type, TCGCond cond, int vece)
 {
     return ct & TCG_CT_CONST;
+}
+
+static void tcg_out_nop_fill(tcg_insn_unit *p, int count)
+{
+    memset(p, 0, sizeof(*p) * count);
 }
 
 /***************************
@@ -2193,4 +2200,12 @@ int print_insn_tcti(bfd_vma addr, disassemble_info *info)
     return sizeof(block);
 }
 
+static bool tcg_out_qemu_ld_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
+{
+    g_assert_not_reached();
+}
 
+static bool tcg_out_qemu_st_slow_path(TCGContext *s, TCGLabelQemuLdst *l)
+{
+    g_assert_not_reached();
+}
