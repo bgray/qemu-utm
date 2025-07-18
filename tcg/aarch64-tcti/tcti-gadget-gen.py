@@ -113,7 +113,7 @@ def simple(name, *lines, export=True):
 
 
 
-def with_register_substitutions(name, substitutions, *lines, immediate_range=range(0)):
+def with_register_substitutions(name, substitutions, *lines, immediate_range=range(0), filter=lambda p: False):
     """ Generates a collection of gadgtes with register substitutions. """
 
     def _expand_op1_immediate(num):
@@ -166,6 +166,10 @@ def with_register_substitutions(name, substitutions, *lines, immediate_range=ran
 
     #  For each permutation...
     for permutation in permutations:
+        # Filter any invalid combination
+        if filter(permutation): 
+            continue
+
         new_lines = lines
 
         # Replace each placeholder element with its proper value...
@@ -212,9 +216,9 @@ def with_dnm(name, *lines):
     print("};", file=c_file)
 
 
-def with_dn_immediate(name, *lines, immediate_range):
+def with_dn_immediate(name, *lines, immediate_range, filter=lambda m: False):
     """ Generates a collection of gadgets with substitutions for Xd, Xn, and Xm, and equivalents. """
-    with_register_substitutions(name, ["d", "n"], *lines, immediate_range=immediate_range)
+    with_register_substitutions(name, ["d", "n"], *lines, immediate_range=immediate_range, filter=lambda p: filter(p[-1]))
 
     # Fetch the files we'll be using for output.
     c_file, h_file = _get_output_files()
@@ -236,7 +240,10 @@ def with_dn_immediate(name, *lines, immediate_range):
 
             # M array
             for i in immediate_range:
-                print(f"gadget_{name}_arg{d}_arg{n}_arg{i}", end=", ", file=c_file)
+                if filter(i):
+                    print(f"(void *)0", end=", ", file=c_file)
+                else:
+                    print(f"gadget_{name}_arg{d}_arg{n}_arg{i}", end=", ", file=c_file)
 
             print("},", file=c_file)
         print("\t},", file=c_file)
@@ -625,6 +632,24 @@ def vector_dnm(name, *lines, scalar=None, omit_sizes=()):
             sized_lines = (scalar,)
         with_dnm(f"{name}_scalar", *sized_lines)
 
+def vector_dn_immediate(name, *lines, scalar=None, immediate_range, omit_sizes=(), filter=lambda s, m: False):
+    """ Creates a set of gadgets for every size of a given vector op. Accepts 'S' as a size placeholder. """
+
+    def do_size_replacement(line, size):
+        return line.replace(".S", f".{size}")
+        
+    # Create a variant for each size, replacing any placeholders.
+    for size in VECTOR_SIZES:
+        if size in omit_sizes:
+            continue
+
+        sized_lines = (do_size_replacement(line, size) for line in lines)
+        with_dn_immediate(f"{name}_{size}", *sized_lines, immediate_range=immediate_range, filter=lambda m: filter(size, m))
+
+    if scalar:
+        if isinstance(scalar, str):
+            sized_lines = (scalar,)
+        with_dn_immediate(f"{name}_scalar", *sized_lines, immediate_range=immediate_range, filter=lambda m: filter(None, m))
 
 def vector_math_dnm(name, operation):
     """ Generates a collection of gadgets for vector math instructions. """
@@ -647,6 +672,9 @@ def vector_logic_dnm(name, operation):
     with_dnm(f"{name}_d", f"{operation} Vd.8b, Vn.8b, Vm.8b")
     with_dnm(f"{name}_q", f"{operation} Vd.16b, Vn.16b, Vm.16b")
 
+def vector_math_dn_immediate(name, operation, immediate_range, filter=lambda x: False):
+    """ Generates a collection of gadgets for vector math instructions. """
+    vector_dn_immediate(name, f"{operation} Vd.S, Vn.S, #Ii", scalar=f"{operation} Dd, Dn, #Ii", immediate_range=immediate_range, filter=filter)
 
 #
 # Gadget definitions.
@@ -1087,6 +1115,33 @@ vector_logic_dnm( "bsl",  "bsl")
 
 vector_math_dnm("shlv", "ushl")
 vector_math_dnm("sshl", "sshl")
+
+def filter_shl(size, imm):
+    match size:
+        case '16b': return imm >= 8
+        case '8b': return imm >= 8
+        case '4h': return imm >= 16
+        case '8h': return imm >= 16
+        case '2s': return imm >= 32
+        case '4s': return imm >= 32
+    return False
+
+def filter_shr(size, imm):
+    if imm == 0:
+        return True
+    match size:
+        case '16b': return imm > 8
+        case '8b': return imm > 8
+        case '4h': return imm > 16
+        case '8h': return imm > 16
+        case '2s': return imm > 32
+        case '4s': return imm > 32
+    return False
+
+vector_math_dn_immediate("shl", "shl", immediate_range=range(64), filter=filter_shl)
+vector_math_dn_immediate("ushr", "ushr", immediate_range=range(1,65), filter=filter_shr)
+vector_math_dn_immediate("sshr", "sshr", immediate_range=range(1,65), filter=filter_shr)
+vector_math_dn_immediate("sli", "sli", immediate_range=range(64), filter=filter_shl)
 
 vector_dnm("cmeq", "cmeq Vd.S, Vn.S, Vm.S", scalar="cmeq Dd, Dn, Dm")
 vector_dnm("cmgt", "cmgt Vd.S, Vn.S, Vm.S", scalar="cmgt Dd, Dn, Dm")

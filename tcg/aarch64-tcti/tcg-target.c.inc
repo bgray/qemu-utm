@@ -217,6 +217,8 @@ tcg_target_op_def(TCGOpcode op, TCGType type, unsigned flags)
         return C_O1_I2(w, w, w);
     case INDEX_op_bitsel_vec:
         return C_O1_I3(w, w, w, w);
+    case INDEX_op_aa64_sli_vec:
+        return C_O1_I2(w, 0, w);
 
     default:
         return C_NotImplemented;
@@ -486,6 +488,13 @@ static void tcg_out_binary_gadget(TCGContext *s, const void *gadget_base[TCG_TAR
 
 /* Write gadget pointer (three registers). */
 static void tcg_out_ternary_gadget(TCGContext *s, const void *gadget_base[TCG_TARGET_GP_REGS][TCG_TARGET_GP_REGS][TCG_TARGET_GP_REGS], unsigned reg0, unsigned reg1, unsigned reg2)
+{
+    tcg_out_gadget(s, gadget_base[reg0][reg1][reg2]);
+}
+
+
+/* Write gadget pointer (three registers, last is immediate value). */
+static void tcg_out_ternary_immediate_gadget(TCGContext *s, const void *gadget_base[TCG_TARGET_GP_REGS][TCG_TARGET_GP_REGS][TCTI_GADGET_IMMEDIATE_ARRAY_LEN], unsigned reg0, unsigned reg1, unsigned reg2)
 {
     tcg_out_gadget(s, gadget_base[reg0][reg1][reg2]);
 }
@@ -1558,13 +1567,18 @@ static void tcg_out_nop_fill(tcg_insn_unit *p, int count)
     tcg_out_sized_vector_gadget_no64(s, name, ternary, vece, a, b, c)
 
 
-#define tcg_out_ternary_vector_gadget_with_scalar(s, name, is_scalar, vece, a, b, c) \
+#define tcg_out_sized_gadget_with_scalar(s, name, arity, is_scalar, vece, args...) \
     if (is_scalar) { \
-        tcg_out_ternary_gadget(s, gadget_ ## name ## _scalar, w0, w1, w2); \
+        tcg_out_ ## arity ## _gadget(s, gadget_ ## name ## _scalar, args); \
     } else { \
-        tcg_out_ternary_vector_gadget(s, name, vece, w0, w1, w2); \
+        tcg_out_sized_vector_gadget(s, name, arity, vece, args); \
     }
 
+#define tcg_out_ternary_vector_gadget_with_scalar(s, name, is_scalar, vece, a, b, c) \
+    tcg_out_sized_gadget_with_scalar(s, name, ternary, is_scalar, vece, a, b, c)
+
+#define tcg_out_ternary_immediate_vector_gadget_with_scalar(s, name, is_scalar, vece, a, b, c) \
+    tcg_out_sized_gadget_with_scalar(s, name, ternary_immediate, is_scalar, vece, a, b, c)
 
 /* Return true if v16 is a valid 16-bit shifted immediate.  */
 static bool is_shimm16(uint16_t v16, int *cmode, int *imm8)
@@ -1765,6 +1779,20 @@ static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc, unsigned vecl, unsigned
         break;
     }
 
+    /* inhibit compiler warning because we use imm as a register */
+    case INDEX_op_shli_vec:
+        tcg_out_ternary_immediate_vector_gadget_with_scalar(s, shl, is_scalar, vece, w0, w1, r2);
+        break;
+    case INDEX_op_shri_vec:
+        tcg_out_ternary_immediate_vector_gadget_with_scalar(s, ushr, is_scalar, vece, w0, w1, r2 - 1);
+        break;
+    case INDEX_op_sari_vec:
+        tcg_out_ternary_immediate_vector_gadget_with_scalar(s, sshr, is_scalar, vece, w0, w1, r2 - 1);
+        break;
+    case INDEX_op_aa64_sli_vec:
+        tcg_out_ternary_immediate_vector_gadget_with_scalar(s, sli, is_scalar, vece, w0, w2, r3);
+        break;
+
     case INDEX_op_mov_vec:  /* Always emitted via tcg_out_mov.  */
     case INDEX_op_dup_vec:  /* Always emitted via tcg_out_dup_vec.  */
     default:
@@ -1787,6 +1815,9 @@ int tcg_can_emit_vec_op(TCGOpcode opc, TCGType type, unsigned vece)
     case INDEX_op_abs_vec:
     case INDEX_op_not_vec:
     case INDEX_op_cmp_vec:
+    case INDEX_op_shli_vec:
+    case INDEX_op_shri_vec:
+    case INDEX_op_sari_vec:
     case INDEX_op_ssadd_vec:
     case INDEX_op_sssub_vec:
     case INDEX_op_usadd_vec:
@@ -1827,6 +1858,14 @@ void tcg_expand_vec_op(TCGOpcode opc, TCGType type, unsigned vece,
     va_end(va);
 
     switch (opc) {
+    case INDEX_op_rotli_vec:
+        t1 = tcg_temp_new_vec(type);
+        tcg_gen_shri_vec(vece, t1, v1, -a2 & ((8 << vece) - 1));
+        vec_gen_4(INDEX_op_aa64_sli_vec, type, vece,
+                  tcgv_vec_arg(v0), tcgv_vec_arg(t1), tcgv_vec_arg(v1), a2);
+        tcg_temp_free_vec(t1);
+        break;
+
     case INDEX_op_shrv_vec:
     case INDEX_op_sarv_vec:
         /* Right shifts are negative left shifts for AArch64.  */
