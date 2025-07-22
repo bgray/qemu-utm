@@ -68,6 +68,7 @@ void tcg_cpu_init_cflags(CPUState *cpu, bool parallel)
     // GOTO_PTR is too complex to emit a simple gadget for.
     // We'll let C handle it, since the overhead is similar.
     cflags |= CF_NO_GOTO_PTR;
+    cpu->cflags_next_tb = CF_NO_GOTO_PTR;
 #endif
     tcg_cflags_set(cpu, cflags);
 }
