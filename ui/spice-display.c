@@ -912,8 +912,8 @@ static void spice_iosurface_destroy(SimpleSpiceDisplay *ssd)
 static int spice_iosurface_resize(SimpleSpiceDisplay *ssd, int width, int height)
 {
     if (ssd->iosurface) {
-        if (IOSurfaceGetHeight(ssd->iosurface) != width ||
-            IOSurfaceGetWidth(ssd->iosurface) != height) {
+        if (IOSurfaceGetHeight(ssd->iosurface) != height ||
+            IOSurfaceGetWidth(ssd->iosurface) != width) {
             spice_iosurface_destroy(ssd);
             return spice_iosurface_create(ssd, width, height);
         } else {
