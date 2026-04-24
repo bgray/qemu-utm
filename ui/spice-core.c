@@ -50,9 +50,7 @@ static int spice_migration_completed;
 static int spice_display_is_running;
 static int spice_have_target_host;
 
-static QemuThread me;
-
-#ifdef CONFIG_ANGLE
+#ifdef CONFIG_EGL
 extern EGLContext spice_gl_ctx;
 #endif
 
@@ -224,7 +222,7 @@ static void channel_event(int event, SpiceChannelEventInfo *info)
      * thread and grab the BQL if so before calling qemu
      * functions.
      */
-    bool need_lock = !qemu_thread_is_self(&me);
+    bool need_lock = !bql_locked();
     if (need_lock) {
         bql_lock();
     }
@@ -510,7 +508,7 @@ static QemuOptsList qemu_spice_opts = {
 #ifdef HAVE_SPICE_GL
         },{
             .name = "gl",
-            .type = QEMU_OPT_BOOL,
+            .type = QEMU_OPT_STRING,
         },{
             .name = "rendernode",
             .type = QEMU_OPT_STRING,
@@ -670,8 +668,6 @@ static void qemu_spice_init(void)
     spice_image_compression_t compression;
     spice_wan_compression_t wan_compr;
     bool seamless_migration;
-
-    qemu_thread_get_self(&me);
 
     if (!opts) {
         return;
@@ -837,34 +833,7 @@ static void qemu_spice_init(void)
     g_free(x509_cacert_file);
     g_free(password);
 
-#ifdef HAVE_SPICE_GL
-    if (qemu_opt_get_bool(opts, "gl", 0)) {
-        if ((port != 0) || (tls_port != 0)) {
-            error_report("SPICE GL support is local-only for now and "
-                         "incompatible with -spice port/tls-port");
-            exit(1);
-        }
-#if defined(CONFIG_GBM)
-        egl_init(qemu_opt_get(opts, "rendernode"), DISPLAY_GL_MODE_ON, &error_fatal);
-#elif defined(CONFIG_ANGLE)
-        if (qemu_egl_init_dpy_angle(DISPLAY_GL_MODE_ES)) {
-            error_report("SPICE GL failed to initialize ANGLE display");
-            exit(1);
-        }
-
-        spice_gl_ctx = qemu_egl_init_ctx();
-        if (!spice_gl_ctx) {
-            error_report("egl: egl_init_ctx failed");
-            exit(1);
-        }
-#else
-        error_report("No backend to support SPICE GL");
-        exit(1);
-#endif
-        display_opengl = 1;
-        spice_opengl = 1;
-    }
-#endif
+    qemu_spice_display_early_init();
 }
 
 static int qemu_spice_add_interface(SpiceBaseInstance *sin)

@@ -27,7 +27,7 @@
 EGLDisplay *qemu_egl_display;
 EGLConfig qemu_egl_config;
 DisplayGLMode qemu_egl_mode;
-bool qemu_egl_angle_d3d;
+void *qemu_egl_angle_native_device;
 
 /* ------------------------------------------------------------------ */
 
@@ -198,17 +198,17 @@ void egl_fb_read_rect(DisplaySurface *dst, egl_fb *src, int x, int y, int w, int
     glPixelStorei(GL_PACK_ROW_LENGTH, 0);
 }
 
-void egl_texture_blit(QemuGLShader *gls, egl_fb *dst, egl_fb *src, bool flip, bool swap)
+void egl_texture_blit(QemuGLShader *gls, egl_fb *dst, egl_fb *src, bool flip)
 {
     glBindFramebuffer(GL_FRAMEBUFFER_EXT, dst->framebuffer);
     glViewport(0, 0, dst->width, dst->height);
     glEnable(GL_TEXTURE_2D);
     glBindTexture(src->texture_target, src->texture);
-    qemu_gl_run_texture_blit(gls, flip, swap);
+    qemu_gl_run_texture_blit(gls, flip);
 }
 
 void egl_texture_blend(QemuGLShader *gls, egl_fb *dst, egl_fb *src, bool flip,
-                       bool swap, int x, int y, double scale_x, double scale_y)
+                       int x, int y, double scale_x, double scale_y)
 {
     glBindFramebuffer(GL_FRAMEBUFFER_EXT, dst->framebuffer);
     int w = scale_x * src->width;
@@ -222,7 +222,7 @@ void egl_texture_blend(QemuGLShader *gls, egl_fb *dst, egl_fb *src, bool flip,
     glBindTexture(src->texture_target, src->texture);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    qemu_gl_run_texture_blit(gls, flip, swap);
+    qemu_gl_run_texture_blit(gls, flip);
     glDisable(GL_BLEND);
 }
 
@@ -472,9 +472,98 @@ bool qemu_egl_destroy_surface(EGLSurface surface)
     return eglDestroySurface(qemu_egl_display, surface);
 }
 
+static int qemu_egl_init_dpy(EGLDisplay dpy, DisplayGLMode mode)
+{
+    static const EGLint conf_att_core[] = {
+        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE,   5,
+        EGL_GREEN_SIZE, 5,
+        EGL_BLUE_SIZE,  5,
+        EGL_ALPHA_SIZE, 0,
+        EGL_NONE,
+    };
+    static const EGLint conf_att_gles[] = {
+        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+        EGL_RED_SIZE,   5,
+        EGL_GREEN_SIZE, 5,
+        EGL_BLUE_SIZE,  5,
+        EGL_ALPHA_SIZE, 0,
+        EGL_NONE,
+    };
+    EGLint major, minor;
+    EGLBoolean b;
+    EGLint n;
+    bool gles = (mode == DISPLAY_GL_MODE_ES);
+
+    qemu_egl_display = dpy;
+
+    b = eglInitialize(qemu_egl_display, &major, &minor);
+    if (b == EGL_FALSE) {
+        error_report("egl: eglInitialize failed");
+        return -1;
+    }
+
+    b = eglBindAPI(gles ?  EGL_OPENGL_ES_API : EGL_OPENGL_API);
+    if (b == EGL_FALSE) {
+        error_report("egl: eglBindAPI failed (%s mode)",
+                     gles ? "gles" : "core");
+        return -1;
+    }
+
+    b = eglChooseConfig(qemu_egl_display,
+                        gles ? conf_att_gles : conf_att_core,
+                        &qemu_egl_config, 1, &n);
+    if (b == EGL_FALSE || n != 1) {
+        error_report("egl: eglChooseConfig failed (%s mode)",
+                     gles ? "gles" : "core");
+        return -1;
+    }
+
+    qemu_egl_mode = gles ? DISPLAY_GL_MODE_ES : DISPLAY_GL_MODE_CORE;
+    return 0;
+}
+
+int qemu_egl_init_dpy_cocoa(DisplayGLMode mode)
+{
+    EGLDisplay dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (dpy == EGL_NO_DISPLAY) {
+        error_report("egl: eglGetDisplay failed");
+        return -1;
+    }
+
+    if (qemu_egl_init_dpy(dpy, mode) < 0) {
+        return -1;
+    }
+
+#ifdef EGL_METAL_DEVICE_ANGLE
+    if (epoxy_has_egl_extension(qemu_egl_display, "EGL_EXT_device_query")) {
+        EGLDeviceEXT device;
+        void *metal_device;
+
+        if (!eglQueryDisplayAttribEXT(qemu_egl_display,
+                                      EGL_DEVICE_EXT,
+                                      (EGLAttrib *)&device)) {
+            return 0;
+        }
+
+        if (!eglQueryDeviceAttribEXT(device,
+                                     EGL_METAL_DEVICE_ANGLE,
+                                     (EGLAttrib *)&metal_device)) {
+            return 0;
+        }
+
+        qemu_egl_angle_native_device = metal_device;
+    }
+#endif
+
+    return 0;
+}
+
 /* ---------------------------------------------------------------------- */
 
-#if defined(CONFIG_X11) || defined(CONFIG_GBM) || defined(CONFIG_ANGLE) || defined(WIN32)
+#if defined(CONFIG_X11) || defined(CONFIG_GBM) || defined(WIN32)
 
 /*
  * Taken from glamor_egl.h from the Xorg xserver, which is MIT licensed
@@ -504,15 +593,16 @@ bool qemu_egl_destroy_surface(EGLSurface surface)
  * platform extensions (EGL_KHR_platform_gbm and friends) yet it doesn't seem
  * like mesa will be able to advertise these (even though it can do EGL 1.5).
  */
-static EGLDisplay qemu_egl_get_display(EGLNativeDisplayType native,
-                                       EGLenum platform)
+static int qemu_egl_init_dpy_platform(EGLNativeDisplayType native,
+                                      EGLenum platform,
+                                      DisplayGLMode mode)
 {
     EGLDisplay dpy = EGL_NO_DISPLAY;
 
     /* In practise any EGL 1.5 implementation would support the EXT extension */
     if (epoxy_has_egl_extension(NULL, "EGL_EXT_platform_base")) {
         if (platform != 0) {
-            dpy = eglGetPlatformDisplayEXT(platform, (void *)native, NULL);
+            dpy = eglGetPlatformDisplayEXT(platform, native, NULL);
         }
     }
 
@@ -520,91 +610,33 @@ static EGLDisplay qemu_egl_get_display(EGLNativeDisplayType native,
         /* fallback */
         dpy = eglGetDisplay(native);
     }
-    return dpy;
-}
 
-static int qemu_egl_init_dpy(EGLNativeDisplayType dpy,
-                             EGLenum platform,
-                             DisplayGLMode mode)
-{
-    static const EGLint conf_att_core[] = {
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
-        EGL_RED_SIZE,   5,
-        EGL_GREEN_SIZE, 5,
-        EGL_BLUE_SIZE,  5,
-        EGL_ALPHA_SIZE, 0,
-        EGL_NONE,
-    };
-    static const EGLint conf_att_gles[] = {
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-        EGL_RED_SIZE,   5,
-        EGL_GREEN_SIZE, 5,
-        EGL_BLUE_SIZE,  5,
-        EGL_ALPHA_SIZE, 0,
-        EGL_NONE,
-    };
-    EGLint major, minor;
-    EGLBoolean b;
-    EGLint n;
-    bool gles = (mode == DISPLAY_GL_MODE_ES);
-
-    qemu_egl_display = qemu_egl_get_display(dpy, platform);
-    if (qemu_egl_display == EGL_NO_DISPLAY) {
-        error_report("egl: eglGetDisplay failed: %s", qemu_egl_get_error_string());
+    if (dpy == EGL_NO_DISPLAY) {
+        error_report("egl: eglGetDisplay failed");
         return -1;
     }
 
-    b = eglInitialize(qemu_egl_display, &major, &minor);
-    if (b == EGL_FALSE) {
-        error_report("egl: eglInitialize failed: %s", qemu_egl_get_error_string());
-        return -1;
-    }
-
-    b = eglBindAPI(gles ?  EGL_OPENGL_ES_API : EGL_OPENGL_API);
-    if (b == EGL_FALSE) {
-        error_report("egl: eglBindAPI failed (%s mode): %s",
-                     gles ? "gles" : "core", qemu_egl_get_error_string());
-        return -1;
-    }
-
-    b = eglChooseConfig(qemu_egl_display,
-                        gles ? conf_att_gles : conf_att_core,
-                        &qemu_egl_config, 1, &n);
-    if (b == EGL_FALSE || n != 1) {
-        error_report("egl: eglChooseConfig failed (%s mode): %s",
-                     gles ? "gles" : "core", qemu_egl_get_error_string());
-        return -1;
-    }
-
-    qemu_egl_mode = gles ? DISPLAY_GL_MODE_ES : DISPLAY_GL_MODE_CORE;
-    return 0;
+    return qemu_egl_init_dpy(dpy, mode);
 }
 
 #endif
-
-int qemu_egl_init_dpy_surfaceless(DisplayGLMode mode)
-{
-    return qemu_egl_init_dpy(EGL_DEFAULT_DISPLAY, EGL_PLATFORM_SURFACELESS_MESA, mode);
-}
 
 #if defined(CONFIG_X11) || defined(CONFIG_GBM)
 int qemu_egl_init_dpy_x11(EGLNativeDisplayType dpy, DisplayGLMode mode)
 {
 #ifdef EGL_KHR_platform_x11
-    return qemu_egl_init_dpy(dpy, EGL_PLATFORM_X11_KHR, mode);
+    return qemu_egl_init_dpy_platform(dpy, EGL_PLATFORM_X11_KHR, mode);
 #else
-    return qemu_egl_init_dpy(dpy, 0, mode);
+    return qemu_egl_init_dpy_platform(dpy, 0, mode);
 #endif
 }
 
 int qemu_egl_init_dpy_mesa(EGLNativeDisplayType dpy, DisplayGLMode mode)
 {
 #ifdef EGL_MESA_platform_gbm
-    return qemu_egl_init_dpy(dpy, EGL_PLATFORM_GBM_MESA, mode);
+    return qemu_egl_init_dpy_platform(dpy, EGL_PLATFORM_GBM_MESA, mode);
 #else
-    return qemu_egl_init_dpy(dpy, 0, mode);
+    return qemu_egl_init_dpy_platform(dpy, 0, mode);
 #endif
 }
 #endif
@@ -618,7 +650,7 @@ int qemu_egl_init_dpy_win32(EGLNativeDisplayType dpy, DisplayGLMode mode)
         mode = DISPLAY_GL_MODE_ES;
     }
 
-    if (qemu_egl_init_dpy(dpy, 0, mode) < 0) {
+    if (qemu_egl_init_dpy(dpy, mode) < 0) {
         return -1;
     }
 
@@ -640,21 +672,12 @@ int qemu_egl_init_dpy_win32(EGLNativeDisplayType dpy, DisplayGLMode mode)
         }
 
         trace_egl_init_d3d11_device(device);
-        qemu_egl_angle_d3d = device != NULL;
+        qemu_egl_angle_native_device = d3d11_device;
     }
 #endif
 
     return 0;
 }
-#endif
-
-#if defined(CONFIG_ANGLE)
-
-int qemu_egl_init_dpy_angle(DisplayGLMode mode)
-{
-    return qemu_egl_init_dpy(EGL_DEFAULT_DISPLAY, EGL_PLATFORM_ANGLE_ANGLE, mode);
-}
-
 #endif
 
 bool qemu_egl_has_dmabuf(void)

@@ -288,11 +288,14 @@ static void displaychangelistener_display_console(DisplayChangeListener *dcl,
                dcl->ops->dpy_gl_scanout_texture) {
         dcl->ops->dpy_gl_scanout_texture(dcl,
                                          con->scanout.texture.backing_id,
-                                         con->scanout.texture.backing_borrow,
+                                         con->scanout.texture.backing_y_0_top,
+                                         con->scanout.texture.backing_width,
+                                         con->scanout.texture.backing_height,
                                          con->scanout.texture.x,
                                          con->scanout.texture.y,
                                          con->scanout.texture.width,
-                                         con->scanout.texture.height);
+                                         con->scanout.texture.height,
+                                         con->scanout.texture.native);
     }
 }
 
@@ -805,6 +808,41 @@ void dpy_gfx_update_full(QemuConsole *con)
     dpy_gfx_update(con, 0, 0, w, h);
 }
 
+typedef struct ScanoutChange {
+    ScanoutTextureNative native;
+    ScanoutTextureCleanup cb_cleanup;
+} ScanoutChange;
+
+#define SCANOUT_CHANGE_NONE ((ScanoutChange){ NO_NATIVE_TEXTURE })
+
+static ScanoutChange dpy_change_scanout_kind(DisplayScanout *scanout,
+                                                     enum display_scanout kind)
+{
+    ScanoutChange change = SCANOUT_CHANGE_NONE;
+
+    /**
+     * We cannot cleanup until the resource is no longer in use, so we record it
+     * You MUST call dpy_complete_scanout_change after all listeners are updated
+     */
+    if (scanout->kind == SCANOUT_TEXTURE && scanout->texture.cb_cleanup) {
+        change.native = scanout->texture.native;
+        change.cb_cleanup = scanout->texture.cb_cleanup;
+    }
+    scanout->kind = kind;
+
+    return change;
+}
+
+static void dpy_complete_scanout_change(ScanoutChange *change)
+{
+    /**
+     * If we previously have a texture and cleanup is required, we call it now
+     */
+    if (change->native.type != SCANOUT_TEXTURE_NATIVE_TYPE_NONE && change->cb_cleanup) {
+        change->cb_cleanup(&change->native);
+    }
+}
+
 void dpy_gfx_replace_surface(QemuConsole *con,
                              DisplaySurface *surface)
 {
@@ -815,6 +853,7 @@ void dpy_gfx_replace_surface(QemuConsole *con,
     DisplayChangeListener *dcl;
     int width;
     int height;
+    ScanoutChange change = SCANOUT_CHANGE_NONE;
 
     if (!surface) {
         if (old_surface) {
@@ -830,7 +869,7 @@ void dpy_gfx_replace_surface(QemuConsole *con,
 
     assert(old_surface != new_surface);
 
-    con->scanout.kind = SCANOUT_SURFACE;
+    change = dpy_change_scanout_kind(&con->scanout, SCANOUT_SURFACE);
     con->surface = new_surface;
     dpy_gfx_create_texture(con, new_surface);
     QLIST_FOREACH(dcl, &s->listeners, next) {
@@ -841,6 +880,7 @@ void dpy_gfx_replace_surface(QemuConsole *con,
     }
     dpy_gfx_destroy_texture(con, old_surface);
     qemu_free_displaysurface(old_surface);
+    dpy_complete_scanout_change(&change);
 }
 
 bool dpy_gfx_check_format(QemuConsole *con,
@@ -999,9 +1039,10 @@ void dpy_gl_scanout_disable(QemuConsole *con)
 {
     DisplayState *s = con->ds;
     DisplayChangeListener *dcl;
+    ScanoutChange change = SCANOUT_CHANGE_NONE;
 
     if (con->scanout.kind != SCANOUT_SURFACE) {
-        con->scanout.kind = SCANOUT_NONE;
+        change = dpy_change_scanout_kind(&con->scanout, SCANOUT_NONE);
     }
     QLIST_FOREACH(dcl, &s->listeners, next) {
         if (con != dcl->con) {
@@ -1011,31 +1052,41 @@ void dpy_gl_scanout_disable(QemuConsole *con)
             dcl->ops->dpy_gl_scanout_disable(dcl);
         }
     }
+    dpy_complete_scanout_change(&change);
 }
 
 void dpy_gl_scanout_texture(QemuConsole *con,
                             uint32_t backing_id,
-                            DisplayGLTextureBorrower backing_borrow,
+                            bool backing_y_0_top,
+                            uint32_t backing_width,
+                            uint32_t backing_height,
                             uint32_t x, uint32_t y,
-                            uint32_t width, uint32_t height)
+                            uint32_t width, uint32_t height,
+                            ScanoutTextureNative native,
+                            ScanoutTextureCleanup cb_cleanup)
 {
     DisplayState *s = con->ds;
     DisplayChangeListener *dcl;
+    ScanoutChange change = SCANOUT_CHANGE_NONE;
 
-    con->scanout.kind = SCANOUT_TEXTURE;
+    change = dpy_change_scanout_kind(&con->scanout, SCANOUT_TEXTURE);
     con->scanout.texture = (ScanoutTexture) {
-        backing_id, backing_borrow,
-        x, y, width, height
+        backing_id, backing_y_0_top, backing_width, backing_height,
+        x, y, width, height, native, cb_cleanup
     };
     QLIST_FOREACH(dcl, &s->listeners, next) {
         if (con != dcl->con) {
             continue;
         }
         if (dcl->ops->dpy_gl_scanout_texture) {
-            dcl->ops->dpy_gl_scanout_texture(dcl, backing_id, backing_borrow,
-                                             x, y, width, height);
+            dcl->ops->dpy_gl_scanout_texture(dcl, backing_id,
+                                             backing_y_0_top,
+                                             backing_width, backing_height,
+                                             x, y, width, height,
+                                             native);
         }
     }
+    dpy_complete_scanout_change(&change);
 }
 
 void dpy_gl_scanout_dmabuf(QemuConsole *con,
@@ -1043,8 +1094,9 @@ void dpy_gl_scanout_dmabuf(QemuConsole *con,
 {
     DisplayState *s = con->ds;
     DisplayChangeListener *dcl;
+    ScanoutChange change = SCANOUT_CHANGE_NONE;
 
-    con->scanout.kind = SCANOUT_DMABUF;
+    change = dpy_change_scanout_kind(&con->scanout, SCANOUT_DMABUF);
     con->scanout.dmabuf = dmabuf;
     QLIST_FOREACH(dcl, &s->listeners, next) {
         if (con != dcl->con) {
@@ -1054,6 +1106,7 @@ void dpy_gl_scanout_dmabuf(QemuConsole *con,
             dcl->ops->dpy_gl_scanout_dmabuf(dcl, dmabuf);
         }
     }
+    dpy_complete_scanout_change(&change);
 }
 
 void dpy_gl_cursor_dmabuf(QemuConsole *con, QemuDmaBuf *dmabuf,

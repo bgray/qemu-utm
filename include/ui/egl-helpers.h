@@ -6,16 +6,13 @@
 #ifdef CONFIG_GBM
 #include <gbm.h>
 #endif
-#ifdef CONFIG_ANGLE
-#include <EGL/eglext_angle.h>
-#endif
 #include "ui/console.h"
 #include "ui/shader.h"
 
 extern EGLDisplay *qemu_egl_display;
 extern EGLConfig qemu_egl_config;
 extern DisplayGLMode qemu_egl_mode;
-extern bool qemu_egl_angle_d3d;
+extern void *qemu_egl_angle_native_device;
 
 typedef struct egl_fb {
     int width;
@@ -41,9 +38,9 @@ void egl_fb_blit(egl_fb *dst, egl_fb *src, bool flip);
 void egl_fb_read(DisplaySurface *dst, egl_fb *src);
 void egl_fb_read_rect(DisplaySurface *dst, egl_fb *src, int x, int y, int w, int h);
 
-void egl_texture_blit(QemuGLShader *gls, egl_fb *dst, egl_fb *src, bool flip, bool swap);
+void egl_texture_blit(QemuGLShader *gls, egl_fb *dst, egl_fb *src, bool flip);
 void egl_texture_blend(QemuGLShader *gls, egl_fb *dst, egl_fb *src, bool flip,
-                       bool swap, int x, int y, double scale_x, double scale_y);
+                       int x, int y, double scale_x, double scale_y);
 
 extern EGLContext qemu_egl_rn_ctx;
 
@@ -68,7 +65,7 @@ EGLSurface qemu_egl_init_buffer_surface(EGLContext ectx, EGLenum buftype,
                                         EGLClientBuffer buffer, const EGLint *attrib_list);
 bool qemu_egl_destroy_surface(EGLSurface surface);
 
-int qemu_egl_init_dpy_surfaceless(DisplayGLMode mode);
+int qemu_egl_init_dpy_cocoa(DisplayGLMode mode);
 
 #if defined(CONFIG_X11) || defined(CONFIG_GBM)
 
@@ -79,10 +76,6 @@ int qemu_egl_init_dpy_mesa(EGLNativeDisplayType dpy, DisplayGLMode mode);
 
 #ifdef WIN32
 int qemu_egl_init_dpy_win32(EGLNativeDisplayType dpy, DisplayGLMode mode);
-#endif
-
-#if defined(CONFIG_ANGLE)
-int qemu_egl_init_dpy_angle(DisplayGLMode mode);
 #endif
 
 EGLContext qemu_egl_init_ctx(void);

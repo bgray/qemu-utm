@@ -19,10 +19,6 @@ typedef struct egl_dpy {
     uint32_t pos_y;
 } egl_dpy;
 
-#ifndef CONFIG_GBM
-static EGLContext ctx;
-#endif
-
 /* ------------------------------------------------------------------ */
 
 static void egl_refresh(DisplayChangeListener *dcl)
@@ -46,12 +42,8 @@ static void egl_gfx_switch(DisplayChangeListener *dcl,
 static QEMUGLContext egl_create_context(DisplayGLCtx *dgc,
                                         QEMUGLParams *params)
 {
-#ifdef CONFIG_GBM
     eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
                    qemu_egl_rn_ctx);
-#else
-    eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx);
-#endif
     return qemu_egl_create_context(dgc, params);
 }
 
@@ -63,14 +55,14 @@ static void egl_scanout_disable(DisplayChangeListener *dcl)
     egl_fb_destroy(&edpy->blit_fb);
 }
 
-static void egl_scanout_imported_texture(DisplayChangeListener *dcl,
+static void egl_scanout_texture(DisplayChangeListener *dcl,
                                 uint32_t backing_id,
                                 bool backing_y_0_top,
                                 uint32_t backing_width,
                                 uint32_t backing_height,
                                 uint32_t x, uint32_t y,
                                 uint32_t w, uint32_t h,
-                                void *d3d_tex2d)
+                                ScanoutTextureNative native)
 {
     egl_dpy *edpy = container_of(dcl, egl_dpy, dcl);
 
@@ -86,25 +78,6 @@ static void egl_scanout_imported_texture(DisplayChangeListener *dcl,
         egl_fb_destroy(&edpy->blit_fb);
         egl_fb_setup_new_tex(&edpy->blit_fb, backing_width, backing_height);
     }
-}
-
-static void egl_scanout_texture(DisplayChangeListener *dcl,
-                                uint32_t backing_id,
-                                DisplayGLTextureBorrower backing_borrow,
-                                uint32_t x, uint32_t y,
-                                uint32_t w, uint32_t h)
-{
-    bool backing_y_0_top;
-    uint32_t backing_width;
-    uint32_t backing_height;
-    void *d3d_tex2d;
-
-    GLuint backing_texture = backing_borrow(backing_id, &backing_y_0_top,
-                                            &backing_width, &backing_height,
-                                            &d3d_tex2d);
-    egl_scanout_imported_texture(dcl, backing_texture, backing_y_0_top,
-                                 backing_width, backing_height,
-                                 x, y, w, h, d3d_tex2d);
 }
 
 #ifdef CONFIG_GBM
@@ -123,8 +96,8 @@ static void egl_scanout_dmabuf(DisplayChangeListener *dcl,
     width = qemu_dmabuf_get_width(dmabuf);
     height = qemu_dmabuf_get_height(dmabuf);
 
-    egl_scanout_imported_texture(dcl, texture, false, width, height, 0, 0,
-                        width, height, NULL);
+    egl_scanout_texture(dcl, texture, false, width, height, 0, 0,
+                        width, height, NO_NATIVE_TEXTURE);
 }
 
 static void egl_cursor_dmabuf(DisplayChangeListener *dcl,
@@ -180,9 +153,9 @@ static void egl_scanout_flush(DisplayChangeListener *dcl,
     if (edpy->cursor_fb.texture) {
         /* have cursor -> render using textures */
         egl_texture_blit(edpy->gls, &edpy->blit_fb, &edpy->guest_fb,
-                         !edpy->y_0_top, false);
+                         !edpy->y_0_top);
         egl_texture_blend(edpy->gls, &edpy->blit_fb, &edpy->cursor_fb,
-                          !edpy->y_0_top, false, edpy->pos_x, edpy->pos_y,
+                          !edpy->y_0_top, edpy->pos_x, edpy->pos_y,
                           1.0, 1.0);
     } else {
         /* no cursor -> use simple framebuffer blit */
@@ -240,20 +213,7 @@ static void early_egl_headless_init(DisplayOptions *opts)
         mode = opts->gl;
     }
 
-#ifdef CONFIG_GBM
     egl_init(opts->u.egl_headless.rendernode, mode, &error_fatal);
-#else
-    if (qemu_egl_init_dpy_surfaceless(mode)) {
-        error_report("egl: display init failed");
-        exit(1);
-    }
-
-    ctx = qemu_egl_init_ctx();
-    if (!ctx) {
-        error_report("egl: egl_init_ctx failed");
-        exit(1);
-    }
-#endif
 }
 
 static void egl_headless_init(DisplayState *ds, DisplayOptions *opts)

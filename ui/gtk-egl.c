@@ -233,12 +233,12 @@ void gd_egl_scanout_disable(DisplayChangeListener *dcl)
     gtk_egl_set_scanout_mode(vc, false);
 }
 
-void gd_egl_scanout_borrowed_texture(DisplayChangeListener *dcl,
+void gd_egl_scanout_texture(DisplayChangeListener *dcl,
                             uint32_t backing_id, bool backing_y_0_top,
                             uint32_t backing_width, uint32_t backing_height,
                             uint32_t x, uint32_t y,
                             uint32_t w, uint32_t h,
-                            void *d3d_tex2d)
+                            ScanoutTextureNative native)
 {
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
 
@@ -263,25 +263,8 @@ void gd_egl_scanout_borrowed_texture(DisplayChangeListener *dcl,
                          backing_id, false);
 }
 
-void gd_egl_scanout_texture(DisplayChangeListener *dcl, uint32_t backing_id,
-                            DisplayGLTextureBorrower backing_borrow,
-                            uint32_t x, uint32_t y,
-                            uint32_t w, uint32_t h)
-{
-    bool backing_y_0_top;
-    uint32_t backing_width;
-    uint32_t backing_height;
-    void *d3d_tex2d;
-
-    GLuint backing_texture = backing_borrow(backing_id, &backing_y_0_top,
-                                            &backing_width, &backing_height,
-                                            &d3d_tex2d);
-    gd_egl_scanout_borrowed_texture(dcl, backing_texture, backing_y_0_top,
-                                    backing_width, backing_height,
-                                    x, y, w, h, d3d_tex2d);
-}
-
-void gd_egl_scanout_dmabuf(DisplayChangeListener *dcl, QemuDmaBuf *dmabuf)
+void gd_egl_scanout_dmabuf(DisplayChangeListener *dcl,
+                           QemuDmaBuf *dmabuf)
 {
 #ifdef CONFIG_GBM
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
@@ -305,8 +288,8 @@ void gd_egl_scanout_dmabuf(DisplayChangeListener *dcl, QemuDmaBuf *dmabuf)
     backing_height = qemu_dmabuf_get_backing_height(dmabuf);
     y0_top = qemu_dmabuf_get_y0_top(dmabuf);
 
-    gd_egl_scanout_borrowed_texture(dcl, texture, y0_top, backing_width,
-                                    backing_height, x, y, width, height, NULL);
+    gd_egl_scanout_texture(dcl, texture, y0_top, backing_width, backing_height,
+                           x, y, width, height, NO_NATIVE_TEXTURE);
 
     if (qemu_dmabuf_get_allow_fences(dmabuf)) {
         vc->gfx.guest_fb.dmabuf = dmabuf;
@@ -372,9 +355,9 @@ void gd_egl_scanout_flush(DisplayChangeListener *dcl,
     egl_fb_setup_default(&vc->gfx.win_fb, ww, wh);
     if (vc->gfx.cursor_fb.texture) {
         egl_texture_blit(vc->gfx.gls, &vc->gfx.win_fb, &vc->gfx.guest_fb,
-                         vc->gfx.y0_top, false);
+                         vc->gfx.y0_top);
         egl_texture_blend(vc->gfx.gls, &vc->gfx.win_fb, &vc->gfx.cursor_fb,
-                          vc->gfx.y0_top, false,
+                          vc->gfx.y0_top,
                           vc->gfx.cursor_x, vc->gfx.cursor_y,
                           vc->gfx.scale_x, vc->gfx.scale_y);
     } else {

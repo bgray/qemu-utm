@@ -69,7 +69,7 @@ endif
 if opengl.found()
   egl_headless_ss = ss.source_set()
   egl_headless_ss.add(when: [opengl, pixman],
-                      if_true: files('egl-headless.c'))
+                      if_true: [files('egl-headless.c'), gbm])
   ui_modules += {'egl-headless' : egl_headless_ss}
 endif
 
@@ -140,6 +140,13 @@ if spice.found()
   ))
   if iosurface.found()
     spice_core_ss.add(iosurface)
+  endif
+  if quartzcore.found()
+    spice_core_ss.add(quartzcore)
+  endif
+  if metal.found()
+    spice_core_ss.add(metal)
+    spice_core_ss.add(files('spice-display-metal.m'))
   endif
   ui_modules += {'spice-core' : spice_core_ss}
 

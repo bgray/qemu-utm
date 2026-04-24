@@ -37,6 +37,7 @@ extern hv_return_t _hv_vcpu_set_actlr(hv_vcpu_t vcpu, uint64_t value);
 /* hvf_slot flags */
 #define HVF_SLOT_LOG (1 << 0)
 
+/* Represent memory logically mapped by QEMU */
 typedef struct hvf_slot {
     uint64_t start;
     uint64_t size;
@@ -45,6 +46,14 @@ typedef struct hvf_slot {
     uint32_t flags;
     MemoryRegion *region;
 } hvf_slot;
+
+/* Represent memory currently mapped in HVF */
+typedef struct hvf_mac_slot {
+    int present;
+    uint64_t size;
+    uint64_t gpa_start;
+    uint64_t gva;
+} hvf_mac_slot;
 
 typedef struct hvf_vcpu_caps {
     uint64_t vmx_cap_pinbased;
@@ -57,7 +66,8 @@ typedef struct hvf_vcpu_caps {
 
 struct HVFState {
     AccelState parent;
-    hvf_slot slots[32];
+    hvf_slot *slots;
+    hvf_mac_slot *mac_slots;
     int num_slots;
 
     hvf_vcpu_caps *hvf_caps;
@@ -66,6 +76,7 @@ struct HVFState {
 };
 extern HVFState *hvf_state;
 extern bool hvf_tso_mode;
+extern uint32_t hvf_ipa_granule_size;
 
 struct AccelCPUState {
     hvf_vcpuid fd;
@@ -81,7 +92,8 @@ void assert_hvf_ok_impl(hv_return_t ret, const char *file, unsigned int line,
 #define assert_hvf_ok(EX) assert_hvf_ok_impl((EX), __FILE__, __LINE__, #EX)
 const char *hvf_return_string(hv_return_t ret);
 int hvf_arch_init(void);
-hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range);
+hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range,
+                               uint32_t ipa_granule_size);
 int hvf_arch_init_vcpu(CPUState *cpu);
 void hvf_arch_vcpu_destroy(CPUState *cpu);
 int hvf_vcpu_exec(CPUState *);

@@ -836,6 +836,8 @@ coref = []
 iokit = []
 iosurface = not_found
 pvg = not_found
+metal = not_found
+quartzcore = not_found
 emulator_link_args = []
 midl = not_found
 widl = not_found
@@ -860,6 +862,8 @@ elif host_os == 'darwin'
   host_dsosuf = '.dylib'
   pvg = dependency('appleframeworks', modules: ['ParavirtualizedGraphics', 'Metal'],
                    required: get_option('pvg'))
+  metal = dependency('appleframeworks', modules: 'Metal', required: false)
+  quartzcore = dependency('appleframeworks', modules: ['OpenGL', 'QuartzCore'], required: false)
 elif host_os == 'sunos'
   socket = [cc.find_library('socket'),
             cc.find_library('nsl'),
@@ -1784,14 +1788,13 @@ if not get_option('coreaudio').auto() or (host_os == 'darwin' and have_system)
                          required: get_option('coreaudio'))
 endif
 
+egl = not_found
 opengl = not_found
 if not get_option('opengl').auto() or have_system or have_vhost_user_gpu
-  epoxy = dependency('epoxy', method: 'pkg-config',
+  opengl = dependency('epoxy', method: 'pkg-config',
                       required: get_option('opengl'))
-  if cc.has_header('epoxy/egl.h', dependencies: epoxy)
-    opengl = epoxy
-  elif get_option('opengl').enabled()
-    error('epoxy/egl.h not found')
+  if cc.has_header('epoxy/egl.h', dependencies: opengl)
+    egl = opengl
   endif
 endif
 gbm = not_found
@@ -2538,6 +2541,7 @@ if numa.found()
                        cc.has_function('numa_has_preferred_many',
                                        dependencies: numa))
 endif
+config_host_data.set('CONFIG_EGL', egl.found())
 config_host_data.set('CONFIG_OPENGL', opengl.found())
 config_host_data.set('CONFIG_PLUGIN', get_option('plugins'))
 config_host_data.set('CONFIG_RBD', rbd.found())
@@ -2580,6 +2584,11 @@ config_host_data.set('CONFIG_VNC', vnc.found())
 config_host_data.set('CONFIG_VNC_JPEG', jpeg.found())
 config_host_data.set('CONFIG_VNC_SASL', sasl.found())
 if virgl.found()
+  config_host_data.set('HAVE_VIRGL_RENDERER_NATIVE_SCANOUT',
+                        cc.has_function('virgl_renderer_create_handle_for_scanout',
+                                        args: '-DVIRGL_RENDERER_UNSTABLE_APIS',
+                                        prefix: '#include <virglrenderer.h>',
+                                        dependencies: virgl))
   config_host_data.set('VIRGL_VERSION_MAJOR', virgl.version().split('.')[0])
 endif
 config_host_data.set('CONFIG_VIRTFS', have_virtfs)
@@ -2625,6 +2634,7 @@ if xen.found()
     ('0' + xen_version[2]).substring(-2)
   config_host_data.set('CONFIG_XEN_CTRL_INTERFACE_VERSION', xen_ctrl_version)
 endif
+config_host_data.set('CONFIG_METAL', metal.found())
 config_host_data.set('QEMU_VERSION', '"@0@"'.format(meson.project_version()))
 config_host_data.set('QEMU_VERSION_MAJOR', meson.project_version().split('.')[0])
 config_host_data.set('QEMU_VERSION_MINOR', meson.project_version().split('.')[1])
@@ -2661,7 +2671,6 @@ config_host_data.set('HAVE_PTY_H', cc.has_header('pty.h'))
 config_host_data.set('HAVE_SYS_DISK_H', cc.has_header('sys/disk.h'))
 config_host_data.set('HAVE_SYS_IOCCOM_H', cc.has_header('sys/ioccom.h'))
 config_host_data.set('HAVE_SYS_KCOV_H', cc.has_header('sys/kcov.h'))
-config_host_data.set('CONFIG_ANGLE', cc.has_header('EGL/eglext_angle.h'))
 if host_os == 'windows'
   config_host_data.set('HAVE_AFUNIX_H', cc.has_header('afunix.h'))
 endif

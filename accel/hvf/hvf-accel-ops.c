@@ -54,6 +54,8 @@
 #include "exec/exec-all.h"
 #include "gdbstub/enums.h"
 #include "hw/boards.h"
+#include "qapi/error.h"
+#include "qapi/visitor.h"
 #include "system/accel-ops.h"
 #include "system/cpus.h"
 #include "system/hvf.h"
@@ -64,8 +66,60 @@
 
 HVFState *hvf_state;
 bool hvf_tso_mode = 0;
+uint32_t hvf_ipa_granule_size = 0;
 
 /* Memory slots */
+
+/* Default num of memslots to be allocated when VM starts */
+#define  HVF_MEMSLOTS_NUM_ALLOC_DEFAULT                      32
+
+static bool hvf_slots_grow(HVFState *state, unsigned int num_slots_new)
+{
+    unsigned int i, cur = state->num_slots;
+    hvf_slot *slots;
+    hvf_mac_slot *mac_slots;
+
+    assert(num_slots_new > cur);
+    if (cur == 0) {
+        slots = g_new0(hvf_slot, num_slots_new);
+        if (!slots) {
+            return false;
+        }
+        mac_slots = g_new0(hvf_mac_slot, num_slots_new);
+        if (!mac_slots) {
+            g_free(slots);
+            return false;
+        }
+    } else {
+        slots = g_renew(hvf_slot, state->slots, num_slots_new);
+        if (!slots) {
+            return false;
+        }
+        mac_slots = g_renew(hvf_mac_slot, state->mac_slots, num_slots_new);
+        if (!mac_slots) {
+            /* save allocated slots but not new size */
+            state->slots = slots;
+            return false;
+        }
+        /*
+         * g_renew() doesn't initialize extended buffers, however hvf
+         * memslots require fields to be zero-initialized. E.g. pointers,
+         * memory_size field, etc.
+         */
+        memset(&slots[cur], 0x0, sizeof(slots[0]) * (num_slots_new - cur));
+        memset(&mac_slots[cur], 0x0, sizeof(mac_slots[0]) * (num_slots_new - cur));
+    }
+
+    for (i = cur; i < num_slots_new; i++) {
+        slots[i].slot_id = i;
+    }
+
+    state->slots = slots;
+    state->mac_slots = mac_slots;
+    state->num_slots = num_slots_new;
+
+    return true;
+}
 
 hvf_slot *hvf_find_overlap_slot(uint64_t start, uint64_t size)
 {
@@ -81,21 +135,12 @@ hvf_slot *hvf_find_overlap_slot(uint64_t start, uint64_t size)
     return NULL;
 }
 
-struct mac_slot {
-    int present;
-    uint64_t size;
-    uint64_t gpa_start;
-    uint64_t gva;
-};
-
-struct mac_slot mac_slots[32];
-
 static int do_hvf_set_memory(hvf_slot *slot, hv_memory_flags_t flags)
 {
-    struct mac_slot *macslot;
+    hvf_mac_slot *macslot;
     hv_return_t ret;
 
-    macslot = &mac_slots[slot->slot_id];
+    macslot = &hvf_state->mac_slots[slot->slot_id];
 
     if (macslot->present) {
         if (macslot->size != slot->size) {
@@ -137,8 +182,20 @@ static void hvf_set_phys_mem(MemoryRegionSection *section, bool add)
         }
     }
 
+    if (hvf_ipa_granule_size) {
+        page_size = hvf_ipa_granule_size;
+    }
+
     if (!QEMU_IS_ALIGNED(int128_get64(section->size), page_size) ||
         !QEMU_IS_ALIGNED(section->offset_within_address_space, page_size)) {
+        if (add) {
+            warn_report("Cannot add 0x%016llX:0x%016llX because it is not "
+                        "aligned to page size (0x%X)",
+                        section->offset_within_address_space,
+                        section->offset_within_address_space +
+                        int128_get64(section->size),
+                        (uint32_t)page_size);
+        }
         /* Not page aligned, so we can not map as RAM */
         add = false;
     }
@@ -187,8 +244,11 @@ static void hvf_set_phys_mem(MemoryRegionSection *section, bool add)
     }
 
     if (x == hvf_state->num_slots) {
-        error_report("No free slots");
-        abort();
+        if (!hvf_slots_grow(hvf_state, hvf_state->num_slots * 2)) {
+            error_report("Cannot allocate any more slots");
+            abort();
+        }
+        mem = &hvf_state->slots[x];
     }
 
     mem->size = int128_get64(section->size);
@@ -325,6 +385,7 @@ static int hvf_accel_init(MachineState *ms)
     HVFState *s;
     int pa_range = 36;
     MachineClass *mc = MACHINE_GET_CLASS(ms);
+    bool success;
 
     if (mc->hvf_get_physical_address_range) {
         pa_range = mc->hvf_get_physical_address_range(ms);
@@ -333,16 +394,13 @@ static int hvf_accel_init(MachineState *ms)
         }
     }
 
-    ret = hvf_arch_vm_create(ms, (uint32_t)pa_range);
+    ret = hvf_arch_vm_create(ms, (uint32_t)pa_range, hvf_ipa_granule_size);
     assert_hvf_ok(ret);
 
     s = g_new0(HVFState, 1);
 
-    s->num_slots = ARRAY_SIZE(s->slots);
-    for (x = 0; x < s->num_slots; ++x) {
-        s->slots[x].size = 0;
-        s->slots[x].slot_id = x;
-    }
+    success = hvf_slots_grow(s, HVF_MEMSLOTS_NUM_ALLOC_DEFAULT);
+    assert(success);
 
     QTAILQ_INIT(&s->hvf_sw_breakpoints);
 
@@ -371,6 +429,34 @@ static inline int hvf_gdbstub_sstep_flags(void)
     return SSTEP_ENABLE | SSTEP_NOIRQ;
 }
 
+static void hvf_get_ipa_granule_size(Object *obj, Visitor *v,
+                                    const char *name, void *opaque,
+                                    Error **errp)
+{
+    HVFState *s = HVF_STATE(obj);
+    uint32_t value = hvf_ipa_granule_size;
+
+    visit_type_uint32(v, name, &value, errp);
+}
+
+static void hvf_set_ipa_granule_size(Object *obj, Visitor *v,
+                                     const char *name, void *opaque,
+                                     Error **errp)
+{
+    HVFState *s = HVF_STATE(obj);
+    uint32_t value;
+
+    if (!visit_type_uint32(v, name, &value, errp)) {
+        return;
+    }
+    if (value & (value - 1)) {
+        error_setg(errp, "ipa-granule-size must be a power of two.");
+        return;
+    }
+
+    hvf_ipa_granule_size = value;
+}
+
 static void hvf_accel_class_init(ObjectClass *oc, void *data)
 {
     AccelClass *ac = ACCEL_CLASS(oc);
@@ -385,6 +471,12 @@ static void hvf_accel_class_init(ObjectClass *oc, void *data)
     object_class_property_set_description(oc, "tso",
         "Set on/off to enable/disable total store ordering mode");
 #endif
+
+    object_class_property_add(oc, "ipa-granule-size", "uint32",
+        hvf_get_ipa_granule_size, hvf_set_ipa_granule_size,
+        NULL, NULL);
+    object_class_property_set_description(oc, "ipa-granule-size",
+        "Size of a single guest page");
 }
 
 static const TypeInfo hvf_accel_type = {
