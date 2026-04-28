@@ -744,6 +744,16 @@ bool egl_init(const char *rendernode, DisplayGLMode mode, Error **errp)
         error_setg(errp, "egl: render node init failed");
         return false;
     }
+#elif defined(CONFIG_EGL)
+    if (qemu_egl_init_dpy_cocoa(mode) < 0) {
+        error_setg(errp, "egl: init failed");
+        return false;
+    }
+    qemu_egl_rn_ctx = qemu_egl_init_ctx();
+    if (!qemu_egl_rn_ctx) {
+        error_setg(errp, "egl: egl_init_ctx failed");
+        return false;
+    }
 #endif
 
     if (!qemu_egl_rn_ctx) {

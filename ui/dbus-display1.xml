@@ -1096,4 +1096,55 @@
     -->
     <property name="Interfaces" type="as" access="read"/>
   </interface>
+
+
+  <!--
+      org.qemu.Display1.Listener.Darwin.IOSurface:
+
+      This optional client-side interface can complement
+      org.qemu.Display1.Listener on ``/org/qemu/Display1/Listener`` for OSX
+      specific IOSurface texture sharing of the scanouts.
+  -->
+  <interface name="org.qemu.Display1.Listener.Darwin.IOSurface">
+    <!--
+        ScanoutTexture2d:
+        @iosurface_id: the IOSurface global id for the shared texture (to be opened back with IOSurfaceLookup).
+        @texture_width: texture width, in pixels.
+        @texture_height: texture height, in pixels.
+        @y0_top: whether Y position 0 is the top or not.
+        @x: the X scanout position, in pixels.
+        @y: the Y scanout position, in pixels.
+        @width: the scanout width, in pixels.
+        @height: the scanout height, in pixels.
+
+        Resize and update the display content with a IOSurface 2D texture.
+    -->
+    <method name="ScanoutTexture2d">
+      <arg type="u" name="iosurface_id" direction="in"/>
+      <arg type="u" name="texture_width" direction="in"/>
+      <arg type="u" name="texture_height" direction="in"/>
+      <arg type="b" name="y0_top" direction="in"/>
+      <arg type="u" name="x" direction="in"/>
+      <arg type="u" name="y" direction="in"/>
+      <arg type="u" name="width" direction="in"/>
+      <arg type="u" name="height" direction="in"/>
+    </method>
+
+    <!--
+        UpdateTexture2d:
+        @x: the X update position, in pixels.
+        @y: the Y update position, in pixels.
+        @width: the update width, in pixels.
+        @height: the update height, in pixels.
+
+        Update the display content with the current IOSurface 2D texture and the given region.
+    -->
+    <method name="UpdateTexture2d">
+      <arg type="i" name="x" direction="in"/>
+      <arg type="i" name="y" direction="in"/>
+      <arg type="i" name="width" direction="in"/>
+      <arg type="i" name="height" direction="in"/>
+    </method>
+  </interface>
+
 </node>

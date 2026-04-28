@@ -34,6 +34,11 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #endif
+#ifdef CONFIG_IOSURFACE
+#import <QuartzCore/QuartzCore.h>
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+#endif
 
 #ifdef CONFIG_OPENGL
 #include "ui/shader.h"
@@ -87,12 +92,31 @@ struct _DBusDisplayListener {
     QemuDBusDisplay1ListenerUnixMap *map_proxy;
 #endif
 
+#ifdef CONFIG_IOSURFACE
+    QemuDBusDisplay1ListenerDarwinIOSurface *iosurface_proxy;
+    IOSurfaceRef iosurface;
+    EGLSurface esurface;
+    egl_fb iosurface_fb;
+    GLuint tex_id;
+    bool y_0_top;
+    QemuGLShader *blit_shader;
+#endif
+
     guint dbus_filter;
     guint32 display_serial_to_discard;
     guint32 cursor_serial_to_discard;
 };
 
 G_DEFINE_TYPE(DBusDisplayListener, dbus_display_listener, G_TYPE_OBJECT)
+
+
+#ifndef EGL_IOSURFACE_WRITE_HINT_ANGLE
+#define EGL_IOSURFACE_WRITE_HINT_ANGLE (0x0002)
+#endif
+
+#ifdef CONFIG_IOSURFACE
+static void dbus_iosurface_destroy(DBusDisplayListener *ddl);
+#endif
 
 static void dbus_gfx_update(DisplayChangeListener *dcl,
                             int x, int y, int w, int h);
@@ -119,6 +143,10 @@ static void dbus_scanout_disable(DisplayChangeListener *dcl)
     DBusDisplayListener *ddl = container_of(dcl, DBusDisplayListener, dcl);
 
     ddl_discard_display_messages(ddl);
+
+#ifdef CONFIG_IOSURFACE
+    dbus_iosurface_destroy(ddl);
+#endif
 
     qemu_dbus_display1_listener_call_disable(
         ddl->proxy, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
@@ -208,7 +236,7 @@ fail:
 }
 #endif /* WIN32 */
 
-#if defined(CONFIG_GBM) || defined(WIN32)
+#if defined(CONFIG_GBM) || defined(WIN32) || defined(CONFIG_IOSURFACE)
 static void dbus_update_gl_cb(GObject *source_object,
                               GAsyncResult *res,
                               gpointer user_data)
@@ -228,6 +256,11 @@ static void dbus_update_gl_cb(GObject *source_object,
     d3d_texture2d_acquire0(ddl->d3d_texture, &error_warn);
 #endif
 
+#ifdef CONFIG_IOSURFACE
+    success = qemu_dbus_display1_listener_darwin_iosurface_call_update_texture2d_finish(
+        ddl->iosurface_proxy, res, &err);
+#endif
+
     if (!success) {
         error_report("Failed to call update: %s", err->message);
     }
@@ -240,7 +273,7 @@ static void dbus_update_gl_cb(GObject *source_object,
 static void dbus_call_update_gl(DisplayChangeListener *dcl,
                                 int x, int y, int w, int h)
 {
-#if defined(CONFIG_GBM) || defined(WIN32)
+#if defined(CONFIG_GBM) || defined(WIN32) || defined(CONFIG_IOSURFACE)
     DBusDisplayListener *ddl = container_of(dcl, DBusDisplayListener, dcl);
 #endif
 
@@ -283,6 +316,40 @@ static void dbus_call_update_gl(DisplayChangeListener *dcl,
     }
     default:
         g_warn_if_reached();
+    }
+#endif
+
+#ifdef CONFIG_IOSURFACE
+    if (ddl->iosurface) {
+        egl_fb tmp_fb = { .texture = ddl->tex_id, .texture_target = GL_TEXTURE_2D };
+
+        if (eglMakeCurrent(qemu_egl_display, ddl->esurface, ddl->esurface, qemu_egl_rn_ctx) == EGL_FALSE) {
+            error_report("eglMakeCurrent failed in %s", __func__);
+            return;
+        }
+
+        if (!ddl->blit_shader) {
+            ddl->blit_shader = qemu_gl_init_shader();
+        }
+
+        egl_texture_blit(ddl->blit_shader, &ddl->iosurface_fb, &tmp_fb, !ddl->y_0_top);
+
+        // ref: https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX10.8.sdk/System/Library/Frameworks/OpenGL.framework/Versions/A/Headers/CGLIOSurface.h
+        glFlush();
+    }
+
+    graphic_hw_gl_block(ddl->dcl.con, true);
+
+    if (!ddl->iosurface_proxy) {
+        error_report("%s: no IOSurface proxy", __func__);
+    } else {
+        qemu_dbus_display1_listener_darwin_iosurface_call_update_texture2d(
+            ddl->iosurface_proxy,
+            x, y, w, h,
+            G_DBUS_CALL_FLAGS_NONE,
+            DBUS_DEFAULT_TIMEOUT, NULL,
+            dbus_update_gl_cb,
+            g_object_ref(ddl));
     }
 #endif
 }
@@ -490,6 +557,158 @@ static bool dbus_scanout_map(DBusDisplayListener *ddl)
 }
 #endif /* WIN32 */
 
+#ifdef CONFIG_IOSURFACE
+static void AddIntegerValue(CFMutableDictionaryRef dictionary, const CFStringRef key, int32_t value)
+{
+    CFNumberRef number = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &value);
+    CFDictionaryAddValue(dictionary, key, number);
+    CFRelease(number);
+}
+
+static bool dbus_iosurface_create_egl(DBusDisplayListener *ddl, int width, int height,
+                                      IOSurfaceRef surface)
+{
+    EGLint target = 0;
+    GLenum tex_target = 0;
+    if (eglGetConfigAttrib(qemu_egl_display,
+                           qemu_egl_config,
+                           EGL_BIND_TO_TEXTURE_TARGET_ANGLE,
+                           &target) != EGL_TRUE) {
+        error_report("dbus_iosurface_create: eglGetConfigAttrib failed");
+        return false;
+    }
+    if (target == EGL_TEXTURE_2D) {
+        tex_target = GL_TEXTURE_2D;
+    } else if (target == EGL_TEXTURE_RECTANGLE_ANGLE) {
+        tex_target = GL_TEXTURE_RECTANGLE_ANGLE;
+    } else {
+        error_report("dbus_iosurface_create: unsupported texture target");
+        return false;
+    }
+
+    const EGLint attribs[] = {
+        EGL_WIDTH,                         width,
+        EGL_HEIGHT,                        height,
+        EGL_IOSURFACE_PLANE_ANGLE,         0,
+        EGL_TEXTURE_TARGET,                target,
+        EGL_TEXTURE_INTERNAL_FORMAT_ANGLE, GL_BGRA_EXT,
+        EGL_TEXTURE_FORMAT,                EGL_TEXTURE_RGBA,
+        EGL_TEXTURE_TYPE_ANGLE,            GL_UNSIGNED_BYTE,
+        EGL_IOSURFACE_USAGE_HINT_ANGLE,    EGL_IOSURFACE_WRITE_HINT_ANGLE,
+        EGL_NONE,                          EGL_NONE,
+    };
+    ddl->esurface = qemu_egl_init_buffer_surface(qemu_egl_rn_ctx,
+                                                 EGL_IOSURFACE_ANGLE,
+                                                 surface,
+                                                 attribs);
+    if (ddl->esurface == EGL_NO_SURFACE) {
+        error_report("dbus_iosurface_create: qemu_egl_init_buffer_surface failed");
+        return false;
+    }
+
+    egl_fb_setup_new_tex_target(&ddl->iosurface_fb, width, height, tex_target);
+
+    eglBindTexImage(qemu_egl_display, ddl->esurface, EGL_BACK_BUFFER);
+
+    return true;
+}
+
+static bool dbus_iosurface_create(DBusDisplayListener *ddl, int width, int height)
+{
+    IOSurfaceRef surface;
+    CFMutableDictionaryRef dict = CFDictionaryCreateMutable(
+        kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    AddIntegerValue(dict, kIOSurfaceWidth, width);
+    AddIntegerValue(dict, kIOSurfaceHeight, height);
+    AddIntegerValue(dict, kIOSurfacePixelFormat, 'BGRA');
+    AddIntegerValue(dict, kIOSurfaceBytesPerElement, 4);
+
+    // On macOS, the IOSurface must be global to be shared between processes.
+    CFDictionaryAddValue(dict, kIOSurfaceIsGlobal, kCFBooleanTrue);
+
+    surface = IOSurfaceCreate(dict);
+    CFRelease(dict);
+
+    if (!surface) {
+        error_report("dbus_iosurface_create: IOSurfaceCreate failed");
+        return false;
+    }
+
+    /*
+    if (spice_opengl == DISPLAY_GL_MODE_CORE) {
+        if (!spice_iosurface_create_cgl(ssd, width, height, surface)) {
+            CFRelease(surface);
+            return false;
+        }
+    } else
+    */
+    {
+        if (!dbus_iosurface_create_egl(ddl, width, height, surface)) {
+            CFRelease(surface);
+            return false;
+        }
+    }
+
+    ddl->iosurface = surface;
+
+//#if defined(CONFIG_METAL)
+//    ddl->metal_context = qemu_spice_display_metal_create_context(surface, width, height);
+//#endif
+
+    return true;
+}
+
+static void dbus_iosurface_destroy_egl(DBusDisplayListener *ddl)
+{
+    eglMakeCurrent(qemu_egl_display, ddl->esurface, ddl->esurface, qemu_egl_rn_ctx);
+    eglReleaseTexImage(qemu_egl_display, ddl->esurface, EGL_BACK_BUFFER);
+    egl_fb_destroy(&ddl->iosurface_fb);
+    qemu_egl_destroy_surface(ddl->esurface);
+    ddl->esurface = EGL_NO_SURFACE;
+}
+
+static void dbus_iosurface_destroy(DBusDisplayListener *ddl)
+{
+    if (!ddl->iosurface) {
+        return;
+    }
+
+    /*
+#if defined(CONFIG_METAL)
+    if (ddl->metal_context) {
+        qemu_spice_display_metal_destroy_context(ddl->metal_context);
+        ddl->metal_context = NULL;
+    }
+#endif
+     */
+
+//    if (spice_opengl == DISPLAY_GL_MODE_CORE) {
+//        dbus_iosurface_destroy_cgl(ddl);
+//    } else
+    {
+        dbus_iosurface_destroy_egl(ddl);
+    }
+
+    CFRelease(ddl->iosurface);
+    ddl->iosurface = NULL;
+}
+
+static bool dbus_iosurface_resize(DBusDisplayListener *ddl, int width, int height)
+{
+    if (ddl->iosurface) {
+        if (IOSurfaceGetHeight(ddl->iosurface) != height ||
+            IOSurfaceGetWidth(ddl->iosurface) != width) {
+            dbus_iosurface_destroy(ddl);
+            return dbus_iosurface_create(ddl, width, height);
+        } else {
+            return true;
+        }
+    } else {
+        return dbus_iosurface_create(ddl, width, height);
+    }
+}
+#endif /* CONFIG_IOSURFACE */
+
 #ifdef CONFIG_OPENGL
 static void dbus_scanout_texture(DisplayChangeListener *dcl,
                                  uint32_t tex_id,
@@ -536,6 +755,30 @@ static void dbus_scanout_texture(DisplayChangeListener *dcl,
     } else {
         dbus_scanout_map(ddl);
         egl_fb_setup_for_tex(&ddl->fb, backing_width, backing_height, tex_id, false);
+    }
+#endif
+
+#ifdef CONFIG_IOSURFACE
+    DBusDisplayListener *ddl = container_of(dcl, DBusDisplayListener, dcl);
+    if (!ddl->iosurface_proxy) {
+        error_report("%s: no IOSurface proxy", __func__);
+        return;
+    }
+
+    // dbus_iosurface_resize creates or resizes the IOSurface to the given size, and returns whether it succeeded.
+    if (dbus_iosurface_resize(ddl, backing_width, backing_height)) {
+        ddl->tex_id = tex_id;
+        ddl->y_0_top = backing_y_0_top;
+
+        ddl_discard_display_messages(ddl);
+
+        qemu_dbus_display1_listener_darwin_iosurface_call_scanout_texture2d(
+            ddl->iosurface_proxy,
+            IOSurfaceGetID(ddl->iosurface),
+            backing_width, backing_height, backing_y_0_top,
+            x, y, w, h,
+            G_DBUS_CALL_FLAGS_NONE,
+            DBUS_DEFAULT_TIMEOUT, NULL, NULL, NULL);
     }
 #endif
 }
@@ -873,6 +1116,11 @@ dbus_display_listener_dispose(GObject *object)
     g_clear_object(&ddl->conn);
     g_clear_pointer(&ddl->bus_name, g_free);
     g_clear_object(&ddl->proxy);
+#ifdef CONFIG_IOSURFACE
+    g_clear_object(&ddl->iosurface_proxy);
+    dbus_iosurface_destroy(ddl);
+    g_clear_pointer(&ddl->blit_shader, qemu_gl_fini_shader);
+#endif
 #ifdef WIN32
     g_clear_object(&ddl->map_proxy);
     g_clear_object(&ddl->d3d11_proxy);
@@ -1027,6 +1275,37 @@ dbus_display_listener_setup_d3d11(DBusDisplayListener *ddl)
 }
 
 static void
+dbus_display_listener_setup_iosurface(DBusDisplayListener *ddl)
+{
+#ifdef CONFIG_IOSURFACE
+    g_autoptr(GError) err = NULL;
+
+    ddl->iosurface = NULL;
+    ddl->esurface = EGL_NO_SURFACE;
+    ddl->tex_id = -1;
+    ddl->blit_shader = NULL;
+
+    if (!dbus_display_listener_implements(ddl,
+            "org.qemu.Display1.Listener.Darwin.IOSurface")) {
+        return;
+    }
+
+    ddl->iosurface_proxy =
+        qemu_dbus_display1_listener_darwin_iosurface_proxy_new_sync(ddl->conn,
+            G_DBUS_PROXY_FLAGS_DO_NOT_AUTO_START,
+            NULL,
+            "/org/qemu/Display1/Listener",
+            NULL,
+            &err);
+    if (!ddl->iosurface_proxy) {
+        g_debug("Failed to setup dawin iosurface proxy: %s", err->message);
+        return;
+    }
+
+#endif
+}
+
+static void
 dbus_display_listener_setup_shared_map(DBusDisplayListener *ddl)
 {
     g_autoptr(GError) err = NULL;
@@ -1159,6 +1438,7 @@ dbus_display_listener_new(const char *bus_name,
     dbus_display_listener_setup_shared_map(ddl);
     trace_dbus_can_share_map(ddl->can_share_map);
     dbus_display_listener_setup_d3d11(ddl);
+    dbus_display_listener_setup_iosurface(ddl);
 
     con = qemu_console_lookup_by_index(dbus_display_console_get_index(console));
     assert(con);
